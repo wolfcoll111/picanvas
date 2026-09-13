@@ -6,7 +6,7 @@
 #   curl -fsSL <tarball-url> | tar -xz && cd picanvas-main && ./install.sh
 set -euo pipefail
 
-VERSION="1.0.2"
+VERSION="1.0.3"
 REPO_URL="https://github.com/wolfcoll111/picanvas.git"
 TARBALL_URL="https://github.com/wolfcoll111/picanvas/archive/refs/heads/main.tar.gz"
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -101,16 +101,32 @@ normalise_flavor() {
   esac
 }
 
+# Never launch a dialog while a previous prompt's captured output is still in
+# the buffer: when a dialog is aborted (Esc/Cancel/Enter-on-Cancel) the next
+# dialog can redraw on a stale screen and swallow a keypress, which looks
+# exactly like "I pressed Enter and nothing happened". Always drain stdin
+# first and force a full repaint between dialogs.
+drain_stdin() {
+  local flags
+  flags=$(stty -g 2>/dev/null) || return 0
+  stty -icanon -echo min 0 time 0 2>/dev/null || return 0
+  # shellcheck disable=SC2162
+  while read -r -t 0.05 _junk 2>/dev/null; do :; done || true
+  stty "$flags" 2>/dev/null || true
+}
+wt_clear() { drain_stdin; command clear >/dev/tty 2>/dev/null || clear; }
+wt() { wt_clear; whiptail "$@"; }
+
 ask_choice_flavor() {
   local def="${1:-ubuntu-xfce}" choice=""
   if $HAS_WHIPTAIL && ! $NON_INTERACTIVE; then
-    choice=$(whiptail --title "PiCanvas $VERSION — Desktop" --menu \
-      "Pick a desktop image (lighter = less RAM, fewer preinstalled apps):" 16 68 4 \
+    choice=$(wt --title "PiCanvas $VERSION — Desktop (Step 2 of 6)" --menu \
+      "Pick a desktop image (lighter = less RAM, fewer preinstalled apps). ENTER = confirm highlighted choice:" 17 70 4 \
       "ubuntu-xfce" "Standard — Ubuntu + XFCE (recommended)" \
       "alpine-xfce" "Ultra-light — Alpine + XFCE (~200MB RAM)" \
       "arch-xfce" "Bleeding-edge — Arch + XFCE" \
       "fedora-xfce" "Alternative — Fedora + XFCE" 3>&1 1>&2 2>&3) \
-      || die "Setup cancelled."
+      || die "Setup cancelled. Press ENTER — nothing further runs."
   elif ! $NON_INTERACTIVE; then
     echo ""
     echo "Desktop environment:"
@@ -133,9 +149,9 @@ ask_choice_flavor() {
 ask_port() {
   local def="$1" label="$2" val=""
   if $HAS_WHIPTAIL && ! $NON_INTERACTIVE; then
-    val=$(whiptail --title "PiCanvas — $label" --inputbox \
-      "Port for $label (1024-65535):" 9 60 "$def" 3>&1 1>&2 2>&3) \
-      || die "Setup cancelled."
+    val=$(wt --title "PiCanvas — $label" --inputbox \
+      "Port for $label (1024-65535). ENTER on <Ok> confirms:" 10 62 "$def" 3>&1 1>&2 2>&3) \
+      || die "Setup cancelled. Press ENTER — nothing further runs."
   elif ! $NON_INTERACTIVE; then
     read -rp "$label port [$def]: " val; val="${val:-$def}"
   else
@@ -153,9 +169,9 @@ ask_yesno() {
     # NOTE: whiptail renders <Yes> first, so an accidental Enter picks "Yes".
     # Default the cursor to <No> unless the saved default is explicitly true.
     if [[ "$def" == "true" ]]; then
-      if whiptail --title "PiCanvas" --yesno "$question" 8 60; then echo "true"; else echo "false"; fi
+      if wt --title "PiCanvas" --yesno "$question  (ENTER on highlighted button)" 9 62; then echo "true"; else echo "false"; fi
     else
-      if whiptail --defaultno --title "PiCanvas" --yesno "$question" 8 60; then echo "true"; else echo "false"; fi
+      if wt --defaultno --title "PiCanvas" --yesno "$question  (ENTER on highlighted button)" 9 62; then echo "true"; else echo "false"; fi
     fi
   else
     local hint="Y/n" dflt="true"
@@ -168,7 +184,7 @@ ask_yesno() {
 ask_secret() {
   local prompt="$1" val=""
   if $HAS_WHIPTAIL && ! $NON_INTERACTIVE; then
-    val=$(whiptail --title "PiCanvas" --passwordbox "$prompt" 9 70 3>&1 1>&2 2>&3) || val=""
+    val=$(wt --title "PiCanvas" --passwordbox "$prompt" 10 72 3>&1 1>&2 2>&3) || val=""
   elif ! $NON_INTERACTIVE; then
     read -rsp "$prompt" val; echo ""
   fi
@@ -200,14 +216,17 @@ cyan ""
 
 step_begin "settings" noticker
 FLAVOR="$(ask_choice_flavor "$DEF_FLAVOR")"
+green "[PiCanvas] ✓ Desktop: $FLAVOR"
 WEB_PORT="$(ask_port "$DEF_WEB" "Desktop HTTP")"
+green "[PiCanvas] ✓ HTTP port: $WEB_PORT"
 HTTPS_PORT="$(ask_port "$DEF_HTTPS" "Desktop HTTPS")"
+green "[PiCanvas] ✓ HTTPS port: $HTTPS_PORT"
 [[ "$WEB_PORT" == "$HTTPS_PORT" ]] && die "HTTP and HTTPS ports must differ."
 
 if ! $NON_INTERACTIVE; then
   if $HAS_WHIPTAIL; then
-    TZ_NEW=$(whiptail --title "PiCanvas — Timezone" --inputbox \
-      "Timezone (e.g. UTC, Europe/Berlin, America/New_York):" 9 65 "$DEF_TZ" 3>&1 1>&2 2>&3) \
+    TZ_NEW=$(wt --title "PiCanvas — Timezone (Step 5 of 6)" --inputbox \
+      "Timezone (e.g. UTC, Europe/Berlin, America/New_York). TAB jumps to <Ok>, then ENTER confirms:" 10 68 "$DEF_TZ" 3>&1 1>&2 2>&3) \
       || TZ_NEW="$DEF_TZ"
   else
     read -rp "Timezone [$DEF_TZ]: " TZ_NEW; TZ_NEW="${TZ_NEW:-$DEF_TZ}"
@@ -215,13 +234,16 @@ if ! $NON_INTERACTIVE; then
 else
   TZ_NEW="$DEF_TZ"
 fi
+green "[PiCanvas] ✓ Timezone: $TZ_NEW"
 
 USE_TS="$(ask_yesno "Enable remote access via Tailscale (reach your Pi from anywhere)?" "$DEF_TS")"
+green "[PiCanvas] ✓ Tailscale: $USE_TS"
 TS_KEY="$DEF_KEY"
 if [[ "$USE_TS" == "true" ]]; then
   warn "Create a key at: https://login.tailscale.com/admin/settings/keys (reusable or ephemeral)."
-  TS_KEY="$(ask_secret "Paste Tailscale auth key (empty = manual 'tailscale up' later): ")"
+  TS_KEY="$(ask_secret "Paste Tailscale auth key, ENTER on <Ok> confirms (empty = manual 'tailscale up' later): ")"
   [[ -z "$TS_KEY" ]] && TS_KEY="$DEF_KEY"
+  if [[ -n "$TS_KEY" ]]; then green "[PiCanvas] ✓ Auth key saved."; else green "[PiCanvas] ✓ No key — manual 'tailscale up' later."; fi
 fi
 
 # --- 3b. Confirm summary (last chance to abort before writing anything) ------
@@ -229,7 +251,8 @@ TS_DISPLAY="$USE_TS"; [[ "$USE_TS" == "true" && -z "$TS_KEY" ]] && TS_DISPLAY="t
 SUMMARY="Desktop:  $FLAVOR\nHTTP:     $WEB_PORT\nHTTPS:    $HTTPS_PORT\nTimezone: $TZ_NEW\nTailscale: $TS_DISPLAY"
 if ! $NON_INTERACTIVE; then
   if $HAS_WHIPTAIL; then
-    whiptail --title "PiCanvas — Confirm" --yesno "Install with these settings?\n\n$SUMMARY" 14 60 \
+    wt_clear
+    whiptail --title "PiCanvas — Confirm" --yesno "Install with these settings?\n\n$SUMMARY" 15 62 \
       || die "Setup cancelled — re-run ./install.sh to try again."
   else
     echo ""
