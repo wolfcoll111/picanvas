@@ -7,6 +7,13 @@ full XFCE desktop in your browser — on your LAN, or anywhere via Tailscale.
 curl -fsSL https://github.com/wolfcoll111/picanvas/archive/refs/heads/main.tar.gz | tar -xz && cd picanvas-main && bash install.sh
 ```
 
+Re-installing or retrying after a failed run? Wipe the old folder first
+(keeps the installer from reusing stale files):
+
+```bash
+rm -rf ~/picanvas-main && curl -fsSL https://github.com/wolfcoll111/picanvas/archive/refs/heads/main.tar.gz | tar -xz && cd ~/picanvas-main && bash install.sh
+```
+
 > If you see `Permission denied` with `./install.sh`, use `bash install.sh`
 > instead (fresh tarball/zip downloads don't keep the executable bit).
 > Alternative: `chmod +x install.sh scripts/*.sh`, then `./install.sh` works.
