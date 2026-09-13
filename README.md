@@ -4,19 +4,23 @@ Clone on Raspberry Pi OS Lite / Debian / Ubuntu Server, run one script, and get 
 full XFCE desktop in your browser — on your LAN, or anywhere via Tailscale.
 
 ```bash
-curl -fsSL https://github.com/wolfcoll111/picanvas/archive/refs/heads/main.tar.gz | tar -xz && cd picanvas-main && ./install.sh
+curl -fsSL https://github.com/wolfcoll111/picanvas/archive/refs/heads/main.tar.gz | tar -xz && cd picanvas-main && bash install.sh
 ```
+
+> If you see `Permission denied` with `./install.sh`, use `bash install.sh`
+> instead (fresh tarball/zip downloads don't keep the executable bit).
+> Alternative: `chmod +x install.sh scripts/*.sh`, then `./install.sh` works.
 
 Prefer git?
 
 ```bash
-git clone https://github.com/wolfcoll111/picanvas.git && cd picanvas && ./install.sh
+git clone https://github.com/wolfcoll111/picanvas.git && cd picanvas && bash install.sh
 ```
 
 Headless / automated installs use the values already in `config.env`:
 
 ```bash
-./install.sh --non-interactive
+bash install.sh --non-interactive
 ```
 
 ---
@@ -71,7 +75,7 @@ Change any time: edit `config.env`, then `docker compose --env-file config.env u
 1. Admin console -> **Settings -> Keys -> Generate auth key**
    ([login.tailscale.com/admin/settings/keys](https://login.tailscale.com/admin/settings/keys)).
    Reusable or ephemeral both work; ephemeral is tidier for a Pi.
-2. Re-run `./install.sh`, answer **Yes** to Tailscale, paste the key —
+2. Re-run `bash install.sh`, answer **Yes** to Tailscale, paste the key —
    or set `USE_TAILSCALE=true` + key in `config.env` and run with `--non-interactive`.
 3. Open `http://<TAILSCALE-IP>:3000` from any device on your tailnet.
    Find the IP with `docker exec picanvas-tailscale tailscale ip -4`.
@@ -97,6 +101,9 @@ they persist in `./data/config`.
 
 ## Troubleshooting
 
+- **Permission denied running `./install.sh`** — expected on fresh tarball
+  downloads (the exec bit isn't preserved). Fix: run `bash install.sh`,
+  or `chmod +x install.sh scripts/*.sh` first.
 - **Browser tab crashes / renderer errors** — already mitigated via
   `shm_size: 1gb` and `seccomp=unconfined` in `docker-compose.yml`; do not remove them.
 - **Port in use** — pick another `WEB_PORT` in `config.env` and re-run.
