@@ -16,6 +16,20 @@ case "$ARCH" in
   *) warn "Untested CPU architecture '$ARCH' — install will continue but images may not exist." ;;
 esac
 
+# Recover from a previously killed run (e.g. terminal closed mid-install):
+# wait for a stale package-manager lock, then finish interrupted configures.
+if command -v fuser >/dev/null 2>&1; then
+  for i in 1 2 3 4 5 6; do
+    if $SUDO fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock >/dev/null 2>&1; then
+      echo "[docker] Another installer holds the package lock — waiting 20s ($i/6) ..."
+      sleep 20
+    else
+      break
+    fi
+  done
+fi
+$SUDO dpkg --configure -a >/dev/null 2>&1 || true
+
 if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
   green "[docker] $(docker --version) + $(docker compose version --short) already installed."
 else
