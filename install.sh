@@ -6,7 +6,7 @@
 #   curl -fsSL <tarball-url> | tar -xz && cd picanvas-main && ./install.sh
 set -euo pipefail
 
-VERSION="1.0.0"
+VERSION="1.0.1"
 REPO_URL="https://github.com/wolfcoll111/picanvas.git"
 TARBALL_URL="https://github.com/wolfcoll111/picanvas/archive/refs/heads/main.tar.gz"
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -113,7 +113,13 @@ ask_yesno() {
   local question="$1" def="$2"
   if $NON_INTERACTIVE; then echo "$def"; return; fi
   if $HAS_WHIPTAIL; then
-    if whiptail --title "PiCanvas" --yesno "$question" 8 60; then echo "true"; else echo "false"; fi
+    # NOTE: whiptail renders <Yes> first, so an accidental Enter picks "Yes".
+    # Default the cursor to <No> unless the saved default is explicitly true.
+    if [[ "$def" == "true" ]]; then
+      if whiptail --title "PiCanvas" --yesno "$question" 8 60; then echo "true"; else echo "false"; fi
+    else
+      if whiptail --defaultno --title "PiCanvas" --yesno "$question" 8 60; then echo "true"; else echo "false"; fi
+    fi
   else
     local hint="Y/n" dflt="true"
     [[ "$def" == "false" ]] && { hint="y/N"; dflt="false"; }
@@ -180,6 +186,22 @@ if [[ "$USE_TS" == "true" ]]; then
   [[ -z "$TS_KEY" ]] && TS_KEY="$DEF_KEY"
 fi
 
+# --- 3b. Confirm summary (last chance to abort before writing anything) ------
+TS_DISPLAY="$USE_TS"; [[ "$USE_TS" == "true" && -z "$TS_KEY" ]] && TS_DISPLAY="true (manual login later)"
+SUMMARY="Desktop:  $FLAVOR\nHTTP:     $WEB_PORT\nHTTPS:    $HTTPS_PORT\nTimezone: $TZ_NEW\nTailscale: $TS_DISPLAY"
+if ! $NON_INTERACTIVE; then
+  if $HAS_WHIPTAIL; then
+    whiptail --title "PiCanvas — Confirm" --yesno "Install with these settings?\n\n$SUMMARY" 14 60 \
+      || die "Setup cancelled — re-run ./install.sh to try again."
+  else
+    echo ""
+    echo "Install with these settings?"
+    printf '%b\n' "$SUMMARY"
+    read -rp "Continue? [Y/n]: " ok; ok="${ok,,}"
+    case "${ok:-y}" in y|yes) ;; *) die "Setup cancelled." ;; esac
+  fi
+fi
+
 # --- 4. Write config.env -----------------------------------------------------
 TMP_CFG="$(mktemp)"
 cat > "$TMP_CFG" <<EOF
@@ -211,7 +233,9 @@ green "[PiCanvas] Wrote $CONFIG_FILE (flavor=$FLAVOR, web=$WEB_PORT/$HTTPS_PORT,
 
 # --- 5. Dependencies ---------------------------------------------------------
 chmod +x "$REPO_DIR/scripts/"*.sh
+green "[PiCanvas] Step 1/3: installing Docker (quiet 2-6 min on a Pi — still working if no new lines appear) ..."
 $SUDO bash "$REPO_DIR/scripts/setup-docker.sh"
+green "[PiCanvas] Step 2/3: Tailscale pre-flight ..."
 $SUDO bash "$REPO_DIR/scripts/setup-tailscale.sh"
 
 # --- 6. Launch ----------------------------------------------------------------
@@ -225,7 +249,7 @@ if [[ "$USE_TS" == "true" ]]; then
   COMPOSE+=("--profile" "tailscale")
 fi
 
-green "[PiCanvas] Pulling images (first run downloads ~300-800MB) ..."
+green "[PiCanvas] Step 3/3: pulling images (first run downloads ~300-800MB) ..."
 "${COMPOSE[@]}" pull || warn "Pull reported an issue — continuing with cached images if present."
 green "[PiCanvas] Starting containers ..."
 "${COMPOSE[@]}" up -d
