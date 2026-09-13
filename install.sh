@@ -6,7 +6,7 @@
 #   curl -fsSL <tarball-url> | tar -xz && cd picanvas-main && ./install.sh
 set -euo pipefail
 
-VERSION="1.0.3"
+VERSION="1.0.4"
 REPO_URL="https://github.com/wolfcoll111/picanvas.git"
 TARBALL_URL="https://github.com/wolfcoll111/picanvas/archive/refs/heads/main.tar.gz"
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -101,11 +101,12 @@ normalise_flavor() {
   esac
 }
 
-# Never launch a dialog while a previous prompt's captured output is still in
-# the buffer: when a dialog is aborted (Esc/Cancel/Enter-on-Cancel) the next
-# dialog can redraw on a stale screen and swallow a keypress, which looks
-# exactly like "I pressed Enter and nothing happened". Always drain stdin
-# first and force a full repaint between dialogs.
+# Stale keypresses left over from a previous prompt can make the next dialog
+# swallow an Enter (looks like "I pressed Enter and nothing happened").
+# Drain them before each dialog. NOTE: never print or clear the screen here —
+# anything written to stdout/stderr inside a $(...) capture leaks into the
+# captured answer (this broke port prompts on kitty TERM as
+# "Invalid port ''xterm-kitty': unknown terminal type.\n3000'").
 drain_stdin() {
   local flags
   flags=$(stty -g 2>/dev/null) || return 0
@@ -114,8 +115,7 @@ drain_stdin() {
   while read -r -t 0.05 _junk 2>/dev/null; do :; done || true
   stty "$flags" 2>/dev/null || true
 }
-wt_clear() { drain_stdin; command clear >/dev/tty 2>/dev/null || clear; }
-wt() { wt_clear; whiptail "$@"; }
+wt() { drain_stdin; whiptail "$@" 3>&1 1>&2 2>&3; }
 
 ask_choice_flavor() {
   local def="${1:-ubuntu-xfce}" choice=""
@@ -125,7 +125,7 @@ ask_choice_flavor() {
       "ubuntu-xfce" "Standard — Ubuntu + XFCE (recommended)" \
       "alpine-xfce" "Ultra-light — Alpine + XFCE (~200MB RAM)" \
       "arch-xfce" "Bleeding-edge — Arch + XFCE" \
-      "fedora-xfce" "Alternative — Fedora + XFCE" 3>&1 1>&2 2>&3) \
+      "fedora-xfce" "Alternative — Fedora + XFCE") \
       || die "Setup cancelled. Press ENTER — nothing further runs."
   elif ! $NON_INTERACTIVE; then
     echo ""
@@ -150,7 +150,7 @@ ask_port() {
   local def="$1" label="$2" val=""
   if $HAS_WHIPTAIL && ! $NON_INTERACTIVE; then
     val=$(wt --title "PiCanvas — $label" --inputbox \
-      "Port for $label (1024-65535). ENTER on <Ok> confirms:" 10 62 "$def" 3>&1 1>&2 2>&3) \
+      "Port for $label (1024-65535). ENTER on <Ok> confirms:" 10 62 "$def") \
       || die "Setup cancelled. Press ENTER — nothing further runs."
   elif ! $NON_INTERACTIVE; then
     read -rp "$label port [$def]: " val; val="${val:-$def}"
@@ -184,7 +184,7 @@ ask_yesno() {
 ask_secret() {
   local prompt="$1" val=""
   if $HAS_WHIPTAIL && ! $NON_INTERACTIVE; then
-    val=$(wt --title "PiCanvas" --passwordbox "$prompt" 10 72 3>&1 1>&2 2>&3) || val=""
+    val=$(wt --title "PiCanvas" --passwordbox "$prompt" 10 72) || val=""
   elif ! $NON_INTERACTIVE; then
     read -rsp "$prompt" val; echo ""
   fi
@@ -226,7 +226,7 @@ green "[PiCanvas] ✓ HTTPS port: $HTTPS_PORT"
 if ! $NON_INTERACTIVE; then
   if $HAS_WHIPTAIL; then
     TZ_NEW=$(wt --title "PiCanvas — Timezone (Step 5 of 6)" --inputbox \
-      "Timezone (e.g. UTC, Europe/Berlin, America/New_York). TAB jumps to <Ok>, then ENTER confirms:" 10 68 "$DEF_TZ" 3>&1 1>&2 2>&3) \
+      "Timezone (e.g. UTC, Europe/Berlin, America/New_York). TAB jumps to <Ok>, then ENTER confirms:" 10 68 "$DEF_TZ") \
       || TZ_NEW="$DEF_TZ"
   else
     read -rp "Timezone [$DEF_TZ]: " TZ_NEW; TZ_NEW="${TZ_NEW:-$DEF_TZ}"
@@ -251,7 +251,7 @@ TS_DISPLAY="$USE_TS"; [[ "$USE_TS" == "true" && -z "$TS_KEY" ]] && TS_DISPLAY="t
 SUMMARY="Desktop:  $FLAVOR\nHTTP:     $WEB_PORT\nHTTPS:    $HTTPS_PORT\nTimezone: $TZ_NEW\nTailscale: $TS_DISPLAY"
 if ! $NON_INTERACTIVE; then
   if $HAS_WHIPTAIL; then
-    wt_clear
+    drain_stdin
     whiptail --title "PiCanvas — Confirm" --yesno "Install with these settings?\n\n$SUMMARY" 15 62 \
       || die "Setup cancelled — re-run ./install.sh to try again."
   else
