@@ -6,7 +6,7 @@
 #   curl -fsSL <tarball-url> | tar -xz && cd picanvas-main && ./install.sh
 set -euo pipefail
 
-VERSION="1.0.6"
+VERSION="1.0.7"
 REPO_URL="https://github.com/wolfcoll111/picanvas.git"
 TARBALL_URL="https://github.com/wolfcoll111/picanvas/archive/refs/heads/main.tar.gz"
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -333,15 +333,13 @@ if [[ "$USE_TS" == "true" ]]; then
 fi
 
 # --- 6a. Image watchdog -------------------------------------------------------
-# Bug (found live on ai-pi, twice): a big pull (1.2GB ubuntu-xfce over wifi)
+# Bug (found live on ai-pi, 3 times): a big pull (1.2GB ubuntu-xfce over wifi)
 # can stall forever — compose sits at 0/X printing nothing for 10+ min, zero
-# errors, zero exit. Two guards:
-#   1. Progress watchdog: compose gives no per-layer events while nothing
-#      moves, so WE print our own line every 30s with elapsed + bytes delta.
-#      Silence is the actual bug from the user's chair — never be silent.
-#   2. Stall restart: if no bytes arrive for `quiet_limit`, kill the pull and
-#      retry. Docker keeps downloaded layers, so a restart resumes — never
-#      restarts from zero.
+# errors, zero exit. So WE narrate, to our own append-only log, every 30s:
+# own line, own \n, never sharing a line with compose's spinner output.
+# (Composing OUR status onto compose's stdout row garbles both into one line
+#  like "[+] pull 0/11wnloading ... 1170s..." — Fix #7 wrote to stdout.)
+WATCH_LOG="$REPO_DIR/.pull.log"
 pull_with_watchdog() {
   local quiet_limit=300 quiet_for=0 last_rx cur_rx rx_delta iface
   local tick=0 net_note="" dl_note=""
@@ -350,7 +348,10 @@ pull_with_watchdog() {
     warn "[PiCanvas] no default route — cannot download. Check wifi/cable, then re-run."
     return 1
   fi
+  : > "$WATCH_LOG"
   last_rx=$(cat "/sys/class/net/$iface/statistics/rx_bytes" 2>/dev/null || echo 0)
+  # Compose keeps its spinner on the terminal; our narration goes to the log
+  # AND to stderr (never stdout — stdout shares compose's redraw row).
   "${COMPOSE[@]}" pull & pull_pid=$!
   while kill -0 "$pull_pid" 2>/dev/null; do
     sleep 30
@@ -374,15 +375,15 @@ pull_with_watchdog() {
       dl_note="image not in local store yet"
     fi
     if (( quiet_for >= quiet_limit )); then
-      warn "[PiCanvas] pull stalled ${quiet_limit}s (${dl_note}) — restarting fetch (downloaded layers are kept) ..."
+      warn "[PiCanvas] pull stalled ${quiet_limit}s (${dl_note}) — restarting fetch (downloaded layers are kept) ..." | tee -a "$WATCH_LOG" >&2
       kill "$pull_pid" 2>/dev/null || true
       wait "$pull_pid" 2>/dev/null || true
       quiet_for=0
       "${COMPOSE[@]}" pull & pull_pid=$!
     elif (( quiet_for > 0 )); then
-      warn "[PiCanvas] pull quiet ${quiet_for}s / ${tick}s total (${net_note}, ${dl_note}) — still trying ..."
+      echo "[PiCanvas] pull quiet ${quiet_for}s / ${tick}s total (${net_note}, ${dl_note}) — still trying ..." | tee -a "$WATCH_LOG" >&2
     else
-      echo "[PiCanvas] downloading ... ${tick}s elapsed (${net_note}, ${dl_note})"
+      echo "[PiCanvas] downloading ... ${tick}s elapsed (${net_note}, ${dl_note})" | tee -a "$WATCH_LOG" >&2
     fi
   done
   wait "$pull_pid" || warn "Pull reported an issue — continuing with cached images if present."
