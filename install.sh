@@ -6,7 +6,7 @@
 #   curl -fsSL <tarball-url> | tar -xz && cd picanvas-main && ./install.sh
 set -euo pipefail
 
-VERSION="1.0.4"
+VERSION="1.0.5"
 REPO_URL="https://github.com/wolfcoll111/picanvas.git"
 TARBALL_URL="https://github.com/wolfcoll111/picanvas/archive/refs/heads/main.tar.gz"
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -55,11 +55,19 @@ die()   { printf '\033[1;31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
 
 # --- live progress (so a quiet Pi never looks frozen) -------------------------
 # Usage: step_begin "label" ... step_done "label"
-# Prints Step N/7 + percent, with a heartbeat line every 20s during long steps.
-STEP_TOTAL=7
+# Prints Step N/8 + percent, with a heartbeat line every 20s during long steps.
+# Checkpoints: each step_done appends its id to .progress so a re-run FAST-FORWARDS
+# through finished work (idempotent reruns, never re-download / re-do).
+STEP_TOTAL=8
 STEP_CUR=0
 TICKER_PID=""
 TICKER_START=0
+PROGRESS_FILE="$REPO_DIR/.progress"
+touch "$PROGRESS_FILE" 2>/dev/null || true
+checkpoint_done() { # idempotent: record once
+  grep -qx "$1" "$PROGRESS_FILE" 2>/dev/null || echo "$1" >> "$PROGRESS_FILE"
+}
+already_done() { grep -qx "$1" "$PROGRESS_FILE" 2>/dev/null; }
 bar() {
   local pct="$1" width=24 filled empty
   filled=$(( pct * width / 100 )); empty=$(( width - filled ))
@@ -294,18 +302,26 @@ if [[ -n "${SUDO_USER:-}" ]]; then
 fi
 green "[PiCanvas] Wrote $CONFIG_FILE (flavor=$FLAVOR, web=$WEB_PORT/$HTTPS_PORT, tailscale=$USE_TS)"
 step_done "saving config"
+checkpoint_done config
 
 # --- 5. Dependencies ---------------------------------------------------------
 chmod +x "$REPO_DIR/scripts/"*.sh
-step_begin "Docker engine (quiet 2-6 min on a Pi — heartbeat below means working)"
-$SUDO bash "$REPO_DIR/scripts/setup-docker.sh"
+step_begin "Docker engine"
+if already_done docker && command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+  green "[PiCanvas] ✓ Docker already installed (checkpoint — verified, skipping reinstall)"
+else
+  $SUDO bash "$REPO_DIR/scripts/setup-docker.sh"
+fi
 step_done "Docker engine"
+checkpoint_done docker
 step_begin "Tailscale pre-flight"
 $SUDO bash "$REPO_DIR/scripts/setup-tailscale.sh"
 step_done "Tailscale pre-flight"
+checkpoint_done tailscale-preflight
 
-# --- 6. Launch ----------------------------------------------------------------
-step_begin "downloading desktop image (~300-800MB first run)"
+# --- 6. Launch (resume-safe: stale half-downloaded pulls are REUSED, ------
+# --- never deleted; `up -d` only fetches layers the daemon still lacks) -----
+step_begin "downloading desktop image"
 mkdir -p "$REPO_DIR/data/config" "$REPO_DIR/data/tailscale"
 if [[ -n "${SUDO_USER:-}" ]]; then
   $SUDO chown -R "$RUN_AS:$(id -gn "$RUN_AS")" "$REPO_DIR/data" || true
@@ -316,11 +332,49 @@ if [[ "$USE_TS" == "true" ]]; then
   COMPOSE+=("--profile" "tailscale")
 fi
 
-"${COMPOSE[@]}" pull || warn "Pull reported an issue — continuing with cached images if present."
+# --- 6a. Image watchdog -------------------------------------------------------
+# Bug (found live on ai-pi): an IPv6-capable host with no IPv6 route lets a
+# huge pull (1.2GB ubuntu-xfce) stall forever at ~20/22 with 0 KB/s — zero
+# errors, zero exit. Watch bytes/s; if a pull goes quiet too long, kill it and
+# retry with plain `up` (Docker resumes only the missing layers, nothing lost).
+pull_with_watchdog() {
+  local quiet_limit=300 quiet_for=0 last_rx cur_rx iface
+  iface=$(ip route get 1.1.1.1 2>/dev/null | awk '{print $5}' | head -1)
+  last_rx=$(cat "/sys/class/net/$iface/statistics/rx_bytes" 2>/dev/null || echo 0)
+  "${COMPOSE[@]}" pull & pull_pid=$!
+  while kill -0 "$pull_pid" 2>/dev/null; do
+    sleep 15
+    # If the user killed the installer (closed terminal), stop watching: the
+    # orphaned pull keeps running safely under the daemon — but WE must exit,
+    # or a re-run stacks a second pull on top of the first.
+    kill -0 "$PPID" 2>/dev/null || { kill "$pull_pid" 2>/dev/null || true; return 0; }
+    cur_rx=$(cat "/sys/class/net/$iface/statistics/rx_bytes" 2>/dev/null || echo "$last_rx")
+    if (( cur_rx - last_rx < 10240 )); then
+      quiet_for=$(( quiet_for + 15 ))
+      warn "[PiCanvas] pull quiet ${quiet_for}s (network stalled — router/registry, not PiCanvas) ..."
+    else
+      quiet_for=0
+    fi
+    last_rx=$cur_rx
+    if (( quiet_for >= quiet_limit )); then
+      warn "[PiCanvas] pull stalled ${quiet_limit}s — restarting fetch (downloaded layers are kept) ..."
+      kill "$pull_pid" 2>/dev/null || true
+      wait "$pull_pid" 2>/dev/null || true
+      quiet_for=0
+      last_rx=$(cat "/sys/class/net/$iface/statistics/rx_bytes" 2>/dev/null || echo 0)
+      "${COMPOSE[@]}" pull & pull_pid=$!
+    fi
+  done
+  wait "$pull_pid" || warn "Pull reported an issue — continuing with cached images if present."
+}
+
+pull_with_watchdog
 step_done "downloading desktop image"
+checkpoint_done image
 step_begin "starting containers"
 "${COMPOSE[@]}" up -d
 step_done "starting containers"
+checkpoint_done up
 
 # --- 7. Wait for the desktop --------------------------------------------------
 step_begin "waiting for desktop on port $WEB_PORT"
@@ -330,6 +384,8 @@ for i in $(seq 1 60); do
   (( i == 60 )) && warn "Desktop is still starting — give it another minute, then check 'docker compose ps'."
 done
 step_done "waiting for desktop on port $WEB_PORT"
+checkpoint_done ready
+rm -f "$PROGRESS_FILE"   # full install done — next run starts fresh
 
 # --- 8. Success banner --------------------------------------------------------
 LAN_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"; LAN_IP="${LAN_IP:-<PI-IP>}"
