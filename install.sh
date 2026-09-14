@@ -6,7 +6,7 @@
 #   curl -fsSL <tarball-url> | tar -xz && cd picanvas-main && ./install.sh
 set -euo pipefail
 
-VERSION="1.0.5"
+VERSION="1.0.6"
 REPO_URL="https://github.com/wolfcoll111/picanvas.git"
 TARBALL_URL="https://github.com/wolfcoll111/picanvas/archive/refs/heads/main.tar.gz"
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -333,36 +333,56 @@ if [[ "$USE_TS" == "true" ]]; then
 fi
 
 # --- 6a. Image watchdog -------------------------------------------------------
-# Bug (found live on ai-pi): an IPv6-capable host with no IPv6 route lets a
-# huge pull (1.2GB ubuntu-xfce) stall forever at ~20/22 with 0 KB/s — zero
-# errors, zero exit. Watch bytes/s; if a pull goes quiet too long, kill it and
-# retry with plain `up` (Docker resumes only the missing layers, nothing lost).
+# Bug (found live on ai-pi, twice): a big pull (1.2GB ubuntu-xfce over wifi)
+# can stall forever — compose sits at 0/X printing nothing for 10+ min, zero
+# errors, zero exit. Two guards:
+#   1. Progress watchdog: compose gives no per-layer events while nothing
+#      moves, so WE print our own line every 30s with elapsed + bytes delta.
+#      Silence is the actual bug from the user's chair — never be silent.
+#   2. Stall restart: if no bytes arrive for `quiet_limit`, kill the pull and
+#      retry. Docker keeps downloaded layers, so a restart resumes — never
+#      restarts from zero.
 pull_with_watchdog() {
-  local quiet_limit=300 quiet_for=0 last_rx cur_rx iface
+  local quiet_limit=300 quiet_for=0 last_rx cur_rx rx_delta iface
+  local tick=0 net_note="" dl_note=""
   iface=$(ip route get 1.1.1.1 2>/dev/null | awk '{print $5}' | head -1)
+  if [[ -z "$iface" ]]; then
+    warn "[PiCanvas] no default route — cannot download. Check wifi/cable, then re-run."
+    return 1
+  fi
   last_rx=$(cat "/sys/class/net/$iface/statistics/rx_bytes" 2>/dev/null || echo 0)
   "${COMPOSE[@]}" pull & pull_pid=$!
   while kill -0 "$pull_pid" 2>/dev/null; do
-    sleep 15
+    sleep 30
+    tick=$(( tick + 30 ))
     # If the user killed the installer (closed terminal), stop watching: the
     # orphaned pull keeps running safely under the daemon — but WE must exit,
     # or a re-run stacks a second pull on top of the first.
     kill -0 "$PPID" 2>/dev/null || { kill "$pull_pid" 2>/dev/null || true; return 0; }
     cur_rx=$(cat "/sys/class/net/$iface/statistics/rx_bytes" 2>/dev/null || echo "$last_rx")
-    if (( cur_rx - last_rx < 10240 )); then
-      quiet_for=$(( quiet_for + 15 ))
-      warn "[PiCanvas] pull quiet ${quiet_for}s (network stalled — router/registry, not PiCanvas) ..."
+    rx_delta=$(( cur_rx - last_rx ))
+    if (( rx_delta < 20480 )); then
+      quiet_for=$(( quiet_for + 30 ))
     else
       quiet_for=0
     fi
+    net_note="net +$(( rx_delta / 1024 ))KB/30s"
     last_rx=$cur_rx
+    if docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -qx "lscr.io/linuxserver/webtop:$FLAVOR"; then
+      dl_note="image present in local store"
+    else
+      dl_note="image not in local store yet"
+    fi
     if (( quiet_for >= quiet_limit )); then
-      warn "[PiCanvas] pull stalled ${quiet_limit}s — restarting fetch (downloaded layers are kept) ..."
+      warn "[PiCanvas] pull stalled ${quiet_limit}s (${dl_note}) — restarting fetch (downloaded layers are kept) ..."
       kill "$pull_pid" 2>/dev/null || true
       wait "$pull_pid" 2>/dev/null || true
       quiet_for=0
-      last_rx=$(cat "/sys/class/net/$iface/statistics/rx_bytes" 2>/dev/null || echo 0)
       "${COMPOSE[@]}" pull & pull_pid=$!
+    elif (( quiet_for > 0 )); then
+      warn "[PiCanvas] pull quiet ${quiet_for}s / ${tick}s total (${net_note}, ${dl_note}) — still trying ..."
+    else
+      echo "[PiCanvas] downloading ... ${tick}s elapsed (${net_note}, ${dl_note})"
     fi
   done
   wait "$pull_pid" || warn "Pull reported an issue — continuing with cached images if present."
